@@ -331,6 +331,25 @@ bool pump_driver_is_fg_active(void)
     return (millis() - last_pulse_tick_ms) < FG_TIMEOUT_MS;
 }
 
+bool pump_driver_check_motor_stall(void)
+{
+    // Motor stall: PWM is ON but no encoder pulses for >150ms
+    // This indicates jammed motor or broken encoder
+    if (!pump_driver_is_running()) return false;  // Not running, no stall
+    
+    uint32_t time_since_pulse = millis() - last_pulse_tick_ms;
+    
+    // Allow initial startup time (first 200ms after start)
+    if (last_pulse_tick_ms == 0 && time_since_pulse < 200) return false;
+    
+    return (time_since_pulse > MOTOR_STALL_TIMEOUT_MS);
+}
+
+uint32_t pump_driver_get_time_since_last_pulse(void)
+{
+    return millis() - last_pulse_tick_ms;
+}
+
 /* ============================================================================
  *                         RESET
  * ============================================================================ */

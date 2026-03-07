@@ -87,6 +87,10 @@ uint32_t pump_driver_get_pulse_count(void);
 uint32_t pump_driver_get_pump_head_rpm(void);
 bool pump_driver_is_fg_active(void);
 
+// Motor stall detection
+bool pump_driver_check_motor_stall(void);    // PWM on but no FG pulses
+uint32_t pump_driver_get_time_since_last_pulse(void);
+
 // Reset
 void pump_driver_reset_pulses(void);
 void pump_driver_reset_fg(void);

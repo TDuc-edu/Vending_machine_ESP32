@@ -7,10 +7,17 @@
  *   - State considered stable when reg[0] == reg[1]
  *   - Scan interval: 50ms (sufficient for liquid sensors)
  *
+ * Fault Detection Matrix:
+ *   - ERR_EMPTY_TANK: Both sensors dry >300ms while pumping
+ *   - ERR_LEAKAGE: Inlet wet, outlet dry >500ms (or 2500ms in priming)
+ *   - ERR_SENSOR_CONFLICT: Inlet dry, outlet wet (logic error)
+ *   - WARN_AIR_BUBBLES: Inlet flickering (>3 transitions in 500ms)
+ *
  * Event publishing:
  *   - EVT_SENSOR_INLET_WATER_OK / EVT_SENSOR_INLET_NO_WATER
  *   - EVT_SENSOR_OUTLET_WATER_OK / EVT_SENSOR_OUTLET_NO_WATER
- *   - EVT_SENSOR_TUBE_FAULT (inlet has water, outlet missing water >500ms)
+ *   - EVT_ERR_EMPTY_TANK, EVT_ERR_LEAKAGE, EVT_ERR_SENSOR_CONFLICT
+ *   - EVT_WARN_AIR_BUBBLES
  */
 
 #include "sensor_driver.h"
@@ -32,10 +39,27 @@ static uint8_t outlet_debounce_reg = 0x03;  // Init HIGH (no water)
 static sensor_state_t prev_inlet_state  = SENSOR_NO_WATER;
 static sensor_state_t prev_outlet_state = SENSOR_NO_WATER;
 
-// Tube fault detection
-#define TUBE_FAULT_TIMEOUT_MS  500      // 500ms of sensor mismatch = fault
-static uint32_t tube_fault_start_ms = 0;
-static bool tube_fault_active = false;
+// Fault monitoring state
+static bool fault_monitoring_enabled = false;
+static bool priming_mode = false;
+
+// Timeout constants (ms)
+#define EMPTY_TANK_TIMEOUT_MS       300     // Both dry → ERR_EMPTY_TANK
+#define LEAKAGE_TIMEOUT_MS          500     // Inlet wet, outlet dry → ERR_LEAKAGE
+#define LEAKAGE_PRIMING_TIMEOUT_MS  2500    // Extended timeout during priming
+#define FLICKER_WINDOW_MS           500     // Window for flicker detection
+#define FLICKER_THRESHOLD           3       // Transitions to trigger warning
+
+// Fault detection timers
+static uint32_t empty_tank_start_ms = 0;
+static uint32_t leakage_start_ms = 0;
+static bool empty_tank_active = false;
+static bool leakage_active = false;
+
+// Flicker detection for air bubbles
+static uint8_t flicker_count = 0;
+static uint32_t flicker_window_start_ms = 0;
+static bool air_bubble_warning_sent = false;
 
 /* ============================================================================
  *                         PRIVATE HELPERS
@@ -89,6 +113,8 @@ bool sensor_driver_init(void)
     sensor_status.outlet_state = SENSOR_NO_WATER;
     sensor_status.inlet_stable = false;
     sensor_status.outlet_stable = false;
+    sensor_status.inlet_stability = SENSOR_STABLE;
+    sensor_status.inlet_flicker_count = 0;
     
     // Initialize debounce registers
     inlet_debounce_reg = 0x03;
@@ -97,11 +123,19 @@ bool sensor_driver_init(void)
     prev_inlet_state = SENSOR_NO_WATER;
     prev_outlet_state = SENSOR_NO_WATER;
     
-    tube_fault_start_ms = 0;
-    tube_fault_active = false;
+    // Reset fault detection
+    fault_monitoring_enabled = false;
+    priming_mode = false;
+    empty_tank_start_ms = 0;
+    leakage_start_ms = 0;
+    empty_tank_active = false;
+    leakage_active = false;
+    flicker_count = 0;
+    flicker_window_start_ms = 0;
+    air_bubble_warning_sent = false;
     
     initialized = true;
-    Serial.println("[SENSOR] Initialized (GPIO21=INLET, GPIO22=OUTLET)");
+    Serial.println("[SENSOR] Initialized (GPIO35=INLET, GPIO39=OUTLET)");
     return true;
 }
 
@@ -128,6 +162,21 @@ void sensor_driver_scan(void)
         sensor_status.inlet_state = debounced_inlet;
         sensor_status.inlet_last_change_ms = now;
         prev_inlet_state = debounced_inlet;
+        
+        // Track flicker count for air bubble detection
+        if (fault_monitoring_enabled) {
+            if (flicker_window_start_ms == 0) {
+                flicker_window_start_ms = now;
+                flicker_count = 1;
+            } else if ((now - flicker_window_start_ms) < FLICKER_WINDOW_MS) {
+                flicker_count++;
+            } else {
+                // Reset window
+                flicker_window_start_ms = now;
+                flicker_count = 1;
+            }
+            sensor_status.inlet_flicker_count = flicker_count;
+        }
         
         // Publish event
         if (debounced_inlet == SENSOR_HAS_WATER) {
@@ -162,26 +211,82 @@ void sensor_driver_scan(void)
         }
     }
     
-    // === TUBE FAULT DETECTION ===
-    // Fault condition: Inlet has water BUT outlet has no water for >500ms
+    // === FAULT DETECTION (only when monitoring enabled) ===
+    if (!fault_monitoring_enabled) {
+        // Reset timers when monitoring disabled
+        empty_tank_start_ms = 0;
+        leakage_start_ms = 0;
+        return;
+    }
+    
+    // --- AIR BUBBLE / FLICKER DETECTION ---
+    if (flicker_count >= FLICKER_THRESHOLD && !air_bubble_warning_sent) {
+        sensor_status.inlet_stability = SENSOR_FLICKERING;
+        air_bubble_warning_sent = true;
+        event_bus_publish(EVT_WARN_AIR_BUBBLES, flicker_count, 0);
+        Serial.printf("[SENSOR] *** AIR BUBBLES DETECTED (%d transitions) ***\n", flicker_count);
+    } else if (flicker_count < FLICKER_THRESHOLD) {
+        sensor_status.inlet_stability = SENSOR_STABLE;
+        // Allow re-triggering if bubbles return after clearing
+        if ((now - flicker_window_start_ms) > FLICKER_WINDOW_MS) {
+            air_bubble_warning_sent = false;
+        }
+    }
+    
+    // --- ERR_EMPTY_TANK: Both sensors dry ---
+    if (sensor_status.inlet_state == SENSOR_NO_WATER && 
+        sensor_status.outlet_state == SENSOR_NO_WATER) {
+        
+        if (empty_tank_start_ms == 0) {
+            empty_tank_start_ms = now;
+        } else if ((now - empty_tank_start_ms) > EMPTY_TANK_TIMEOUT_MS && !empty_tank_active) {
+            empty_tank_active = true;
+            event_bus_publish(EVT_ERR_EMPTY_TANK, 0, 0);
+            Serial.println("[SENSOR] *** ERR_EMPTY_TANK: Both sensors DRY ***");
+        }
+    } else {
+        empty_tank_start_ms = 0;
+        if (empty_tank_active) {
+            empty_tank_active = false;
+            Serial.println("[SENSOR] Empty tank condition cleared");
+        }
+    }
+    
+    // --- ERR_LEAKAGE: Inlet wet, outlet dry (tube broken) ---
+    uint32_t leakage_timeout = priming_mode ? LEAKAGE_PRIMING_TIMEOUT_MS : LEAKAGE_TIMEOUT_MS;
+    
     if (sensor_status.inlet_state == SENSOR_HAS_WATER && 
         sensor_status.outlet_state == SENSOR_NO_WATER) {
         
-        if (tube_fault_start_ms == 0) {
-            tube_fault_start_ms = now;
-        } else if ((now - tube_fault_start_ms) > TUBE_FAULT_TIMEOUT_MS && !tube_fault_active) {
-            // Fault confirmed
-            tube_fault_active = true;
-            event_bus_publish(EVT_SENSOR_TUBE_FAULT, 0, 0);
-            Serial.println("[SENSOR] *** TUBE FAULT DETECTED ***");
+        if (leakage_start_ms == 0) {
+            leakage_start_ms = now;
+        } else if ((now - leakage_start_ms) > leakage_timeout && !leakage_active) {
+            leakage_active = true;
+            event_bus_publish(EVT_ERR_LEAKAGE, 0, 0);
+            Serial.println("[SENSOR] *** ERR_LEAKAGE: Tube broken/disconnected ***");
         }
     } else {
-        // No fault condition: reset timer
-        tube_fault_start_ms = 0;
-        if (tube_fault_active) {
-            tube_fault_active = false;
-            Serial.println("[SENSOR] Tube fault cleared");
+        leakage_start_ms = 0;
+        if (leakage_active) {
+            leakage_active = false;
+            Serial.println("[SENSOR] Leakage condition cleared");
         }
+    }
+    
+    // --- ERR_SENSOR_CONFLICT: Inlet dry, outlet wet (impossible state) ---
+    // This is checked instantly, no timeout needed
+    static bool sensor_conflict_sent = false;
+    if (sensor_status.inlet_state == SENSOR_NO_WATER && 
+        sensor_status.outlet_state == SENSOR_HAS_WATER) {
+        // Only publish once per occurrence
+        if (!sensor_conflict_sent) {
+            sensor_conflict_sent = true;
+            event_bus_publish(EVT_ERR_SENSOR_CONFLICT, 0, 0);
+            Serial.println("[SENSOR] *** ERR_SENSOR_CONFLICT: Logic error ***");
+        }
+    } else {
+        // Allow re-triggering if condition clears and returns
+        sensor_conflict_sent = false;
     }
 }
 
@@ -207,5 +312,55 @@ const sensor_status_t* sensor_driver_get_status(void)
 
 bool sensor_driver_check_tube_fault(void)
 {
-    return tube_fault_active;
+    // Legacy function - now returns leakage_active
+    return leakage_active;
+}
+
+void sensor_driver_enable_fault_monitoring(bool enable)
+{
+    fault_monitoring_enabled = enable;
+    if (enable) {
+        // Reset all fault timers when monitoring starts
+        empty_tank_start_ms = 0;
+        leakage_start_ms = 0;
+        flicker_count = 0;
+        flicker_window_start_ms = 0;
+        air_bubble_warning_sent = false;
+        Serial.println("[SENSOR] Fault monitoring ENABLED");
+    } else {
+        // Clear active faults when monitoring disabled
+        empty_tank_active = false;
+        leakage_active = false;
+        Serial.println("[SENSOR] Fault monitoring DISABLED");
+    }
+}
+
+bool sensor_driver_is_inlet_flickering(void)
+{
+    return (sensor_status.inlet_stability == SENSOR_FLICKERING);
+}
+
+bool sensor_driver_check_sensor_conflict(void)
+{
+    return (sensor_status.inlet_state == SENSOR_NO_WATER && 
+            sensor_status.outlet_state == SENSOR_HAS_WATER);
+}
+
+bool sensor_driver_both_dry(void)
+{
+    return (sensor_status.inlet_state == SENSOR_NO_WATER && 
+            sensor_status.outlet_state == SENSOR_NO_WATER);
+}
+
+void sensor_driver_set_priming_mode(bool enable)
+{
+    priming_mode = enable;
+    if (enable) {
+        // Reset leakage timer to give priming full timeout
+        leakage_start_ms = 0;
+        leakage_active = false;
+        Serial.println("[SENSOR] Priming mode ENABLED (extended timeout)");
+    } else {
+        Serial.println("[SENSOR] Priming mode DISABLED");
+    }
 }

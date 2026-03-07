@@ -27,7 +27,9 @@ typedef enum {
     VEND_STATE_HOLD_PUMP,       // BTN_0 held → continuous pump
     VEND_STATE_DISPENSING,      // Volume-based dispensing
     VEND_STATE_COMPLETE,        // Dispense done (brief pause before IDLE)
-    VEND_STATE_ERROR,
+    VEND_STATE_PRIMING,         // Priming mode (after air bubble warning)
+    VEND_STATE_ERROR,           // Recoverable error
+    VEND_STATE_LOCKDOWN,        // Serious error - needs technician reset
     VEND_STATE_COUNT
 } vend_state_t;
 
@@ -69,5 +71,25 @@ const char* vending_controller_get_state_name(void);
  * @return true if started
  */
 bool vending_controller_dispense_ml(uint32_t volume_ml, uint8_t speed_percent);
+
+/**
+ * @brief Reset lockdown state (technician function)
+ * @details Only call after technician has verified and fixed the issue
+ * @return true if successfully reset from lockdown
+ */
+bool vending_controller_reset_lockdown(void);
+
+/**
+ * @brief Get last error code (for RS485/MQTT reporting)
+ * @return error code (0=none, 1=empty_tank, 2=leakage, 3=motor_stall, 4=sensor_conflict)
+ */
+uint8_t vending_controller_get_last_error(void);
+
+/**
+ * @brief Start priming mode manually
+ * @param speed_percent Pump speed for priming
+ * @return true if priming started
+ */
+bool vending_controller_start_priming(uint8_t speed_percent);
 
 #endif // VENDING_CONTROLLER_H

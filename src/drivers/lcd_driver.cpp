@@ -149,9 +149,9 @@ void lcd_driver_show_startup(void)
     
     //                  "01234567890123456789"
     lcd_driver_print_at(0, 0, "== VENDING MACHINE ==");
-    lcd_driver_print_at(0, 1, "  ESP32-WROOM-32    ");
+    lcd_driver_print_at(0, 1, "    BKIT HARDWARE   ");
     lcd_driver_print_at(0, 2, "  Initializing...   ");
-    lcd_driver_print_at(0, 3, "  v1.0 FreeRTOS     ");
+    lcd_driver_print_at(0, 3, "      v1.0          ");
 }
 
 void lcd_driver_show_ready(void)

@@ -50,6 +50,7 @@ typedef enum {
 // FG signal timeout
 #define FG_TIMEOUT_MS           500
 #define RPM_SAMPLE_PERIOD_MS    1000
+#define MOTOR_STALL_TIMEOUT_MS  150     // Motor stall detection (PWM on, no pulses)
 
 /* ============================================================================
  *                         SYSTEM STATUS STRUCTURE

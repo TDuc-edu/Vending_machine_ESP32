@@ -41,6 +41,11 @@ typedef enum {
     SENSOR_HAS_WATER = 1    // GPIO LOW (active)
 } sensor_state_t;
 
+typedef enum {
+    SENSOR_STABLE = 0,      // State is stable
+    SENSOR_FLICKERING = 1   // State is flickering (air bubbles)
+} sensor_stability_t;
+
 typedef struct {
     sensor_state_t inlet_state;         // Current inlet sensor state
     sensor_state_t outlet_state;        // Current outlet sensor state
@@ -48,6 +53,8 @@ typedef struct {
     bool outlet_stable;                 // Outlet state is debounced and stable
     uint32_t inlet_last_change_ms;      // Timestamp of last inlet state change
     uint32_t outlet_last_change_ms;     // Timestamp of last outlet state change
+    sensor_stability_t inlet_stability; // Inlet flickering status
+    uint8_t inlet_flicker_count;        // Number of transitions in detection window
 } sensor_status_t;
 
 /* ============================================================================
@@ -98,5 +105,35 @@ const sensor_status_t* sensor_driver_get_status(void);
  * @return true if fault condition detected
  */
 bool sensor_driver_check_tube_fault(void);
+
+/**
+ * @brief Enable/disable fault monitoring (while pump is running)
+ * @param enable true to start monitoring, false to stop
+ */
+void sensor_driver_enable_fault_monitoring(bool enable);
+
+/**
+ * @brief Check if inlet sensor is flickering (air bubbles)
+ * @return true if flickering detected
+ */
+bool sensor_driver_is_inlet_flickering(void);
+
+/**
+ * @brief Check for sensor conflict (inlet dry but outlet wet)
+ * @return true if conflict detected
+ */
+bool sensor_driver_check_sensor_conflict(void);
+
+/**
+ * @brief Check if both sensors are dry (tank empty)
+ * @return true if both sensors show no water
+ */
+bool sensor_driver_both_dry(void);
+
+/**
+ * @brief Set priming mode (extends timeout for outlet detection)
+ * @param enable true for priming mode
+ */
+void sensor_driver_set_priming_mode(bool enable);
 
 #endif // SENSOR_DRIVER_H

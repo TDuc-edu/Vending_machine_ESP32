@@ -69,7 +69,14 @@
 #define EVT_SENSOR_INLET_NO_WATER   0x0701
 #define EVT_SENSOR_OUTLET_WATER_OK  0x0702
 #define EVT_SENSOR_OUTLET_NO_WATER  0x0703
-#define EVT_SENSOR_TUBE_FAULT       0x0704
+#define EVT_SENSOR_TUBE_FAULT       0x0704   // Deprecated: use specific errors below
+
+// Error events (0x08xx) - Comprehensive fault detection
+#define EVT_ERR_EMPTY_TANK          0x0800   // Both sensors dry while pumping
+#define EVT_ERR_LEAKAGE             0x0801   // Inlet wet, outlet dry (tube broken)
+#define EVT_ERR_MOTOR_STALL         0x0802   // PWM on but encoder not counting
+#define EVT_ERR_SENSOR_CONFLICT     0x0803   // Inlet dry, outlet wet (logic error)
+#define EVT_WARN_AIR_BUBBLES        0x0804   // Inlet flickering (air in line)
 
 /* ============================================================================
  *                         EVENT STRUCTURE

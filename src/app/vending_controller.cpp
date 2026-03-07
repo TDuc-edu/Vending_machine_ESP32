@@ -43,10 +43,22 @@ static uint8_t  dispense_speed   = 0;
 
 // Error tracking
 static uint32_t no_fg_count      = 0;
+static uint32_t last_stall_check_ms = 0;
 #define NO_FG_ERROR_THRESHOLD    50  // 50 × 10ms = 500ms without FG signal
+#define STALL_CHECK_INTERVAL_MS  20  // Check motor stall every 20ms
+
+// Error codes for RS485 reporting
+typedef enum {
+    ERR_CODE_NONE = 0,
+    ERR_CODE_EMPTY_TANK,
+    ERR_CODE_LEAKAGE,
+    ERR_CODE_MOTOR_STALL,
+    ERR_CODE_SENSOR_CONFLICT
+} error_code_t;
+static error_code_t last_error_code = ERR_CODE_NONE;
 
 static const char* STATE_NAMES[] = {
-    "IDLE", "HOLD_PUMP", "DISPENSING", "COMPLETE", "ERROR"
+    "IDLE", "HOLD_PUMP", "DISPENSING", "COMPLETE", "PRIMING", "ERROR", "LOCKDOWN"
 };
 
 /* ============================================================================
@@ -70,19 +82,43 @@ static void transition_to(vend_state_t new_state)
             system_state_set(SYS_STATE_READY);
             led_driver_set_pattern(LED_BLINK_SLOW);
             lcd_driver_show_ready();
+            sensor_driver_enable_fault_monitoring(false);
+            sensor_driver_set_priming_mode(false);
+            last_error_code = ERR_CODE_NONE;
             break;
         case VEND_STATE_HOLD_PUMP:
+            // HOLD mode = Manual priming - NO fault monitoring
+            // User controls pump manually, will release when done
+            // This allows priming empty tubes without sensor errors
             system_state_set(SYS_STATE_HOLD_PUMP);
             led_driver_set_pattern(LED_ON);
+            sensor_driver_enable_fault_monitoring(false);  // Disabled for manual control
+            lcd_driver_update_info("HOLD: Priming...");
             break;
         case VEND_STATE_DISPENSING:
             system_state_set(SYS_STATE_DISPENSING);
             led_driver_set_pattern(LED_BLINK_FAST);
+            sensor_driver_enable_fault_monitoring(true);
+            break;
+        case VEND_STATE_PRIMING:
+            system_state_set(SYS_STATE_DISPENSING);
+            led_driver_set_pattern(LED_BLINK_FAST);
+            sensor_driver_enable_fault_monitoring(true);
+            sensor_driver_set_priming_mode(true);
+            lcd_driver_update_info("Priming...");
             break;
         case VEND_STATE_ERROR:
             system_state_set(SYS_STATE_ERROR);
             led_driver_set_pattern(LED_BLINK_ERROR);
-            lcd_driver_show_error("System Error");
+            sensor_driver_enable_fault_monitoring(false);
+            // LCD error message set by caller
+            break;
+        case VEND_STATE_LOCKDOWN:
+            system_state_set(SYS_STATE_ERROR);
+            led_driver_set_pattern(LED_BLINK_ERROR);
+            sensor_driver_enable_fault_monitoring(false);
+            lcd_driver_show_error("LOCKDOWN!");
+            Serial.println("[VEND] *** SYSTEM LOCKDOWN - TECHNICIAN REQUIRED ***");
             break;
         default:
             break;
@@ -178,10 +214,12 @@ static void handle_button_long_pressed(uint32_t btn_index)
 
 static void handle_button_released(uint32_t btn_index)
 {
-    // Release BTN_0 stops hold-pump mode
-    if (current_state == VEND_STATE_HOLD_PUMP && btn_index == BTN_IDX_HOLD) {
+    // Release BTN_0 stops hold-pump mode or priming mode
+    if ((current_state == VEND_STATE_HOLD_PUMP || current_state == VEND_STATE_PRIMING) && 
+        btn_index == BTN_IDX_HOLD) {
         pump_driver_soft_stop(20, 20);
         Serial.println("[VEND] Hold released, stopping pump");
+        sensor_driver_set_priming_mode(false);
         transition_to(VEND_STATE_IDLE);
     }
 }
@@ -317,14 +355,73 @@ void vending_controller_update(void)
 
             // Sensor events
             case EVT_SENSOR_TUBE_FAULT:
-                // Critical fault: tube broken, disconnected, or tank empty
-                Serial.println("[VEND] *** TUBE FAULT DETECTED ***");
-                lcd_driver_show_error("Tube Fault/No Water");
+                // Legacy event - now handled by ERR_LEAKAGE
+                break;
+
+            // === COMPREHENSIVE ERROR HANDLING ===
+            // Note: HOLD_PUMP is excluded - it's manual priming mode
+            case EVT_ERR_EMPTY_TANK:
+                // CRITICAL: Tank empty - both sensors dry
+                Serial.println("[VEND] *** ERR_EMPTY_TANK: Stopping pump ***");
+                lcd_driver_show_error("Tank Empty!");
+                last_error_code = ERR_CODE_EMPTY_TANK;
                 if (current_state == VEND_STATE_DISPENSING || 
-                    current_state == VEND_STATE_HOLD_PUMP) {
+                    current_state == VEND_STATE_PRIMING) {
+                    // Don't stop HOLD_PUMP - it's manual priming mode
                     pump_driver_stop();
-                    event_bus_publish(EVT_FLOW_ERROR, 0, 0);
+                    event_bus_publish(EVT_FLOW_ERROR, ERR_CODE_EMPTY_TANK, 0);
                     transition_to(VEND_STATE_ERROR);
+                }
+                break;
+
+            case EVT_ERR_LEAKAGE:
+                // CRITICAL: Tube broken/disconnected - LOCKDOWN required
+                Serial.println("[VEND] *** ERR_LEAKAGE: LOCKDOWN ***");
+                lcd_driver_show_error("LEAK DETECTED!");
+                last_error_code = ERR_CODE_LEAKAGE;
+                if (current_state == VEND_STATE_DISPENSING || 
+                    current_state == VEND_STATE_PRIMING) {
+                    // Don't stop HOLD_PUMP - it's manual priming mode
+                    pump_driver_stop();
+                    event_bus_publish(EVT_FLOW_ERROR, ERR_CODE_LEAKAGE, 0);
+                    transition_to(VEND_STATE_LOCKDOWN);  // Requires technician reset
+                }
+                break;
+
+            case EVT_ERR_MOTOR_STALL:
+                // CRITICAL: Motor jammed or encoder broken - LOCKDOWN
+                Serial.println("[VEND] *** ERR_MOTOR_STALL: LOCKDOWN ***");
+                lcd_driver_show_error("Motor Stall!");
+                last_error_code = ERR_CODE_MOTOR_STALL;
+                if (current_state == VEND_STATE_DISPENSING || 
+                    current_state == VEND_STATE_PRIMING) {
+                    // Don't stop HOLD_PUMP - it's manual priming mode
+                    pump_driver_stop();
+                    event_bus_publish(EVT_FLOW_ERROR, ERR_CODE_MOTOR_STALL, 0);
+                    transition_to(VEND_STATE_LOCKDOWN);  // Requires technician reset
+                }
+                break;
+
+            case EVT_ERR_SENSOR_CONFLICT:
+                // Logic error: inlet dry but outlet wet (impossible)
+                Serial.println("[VEND] *** ERR_SENSOR_CONFLICT: Sensor logic error ***");
+                lcd_driver_show_error("Sensor Error!");
+                last_error_code = ERR_CODE_SENSOR_CONFLICT;
+                // Prevent new cycles but don't stop current operation
+                if (current_state == VEND_STATE_IDLE) {
+                    transition_to(VEND_STATE_ERROR);
+                }
+                break;
+
+            case EVT_WARN_AIR_BUBBLES:
+                // Warning: air in line - suggest priming
+                Serial.println("[VEND] WARNING: Air bubbles detected");
+                lcd_driver_update_info("Air in line!");
+                if (current_state == VEND_STATE_DISPENSING) {
+                    // Pause current operation, switch to priming
+                    pump_driver_stop();
+                    lcd_driver_show_error("Priming Required");
+                    transition_to(VEND_STATE_PRIMING);
                 }
                 break;
 
@@ -332,10 +429,6 @@ void vending_controller_update(void)
                 // Warning: no water at inlet
                 Serial.println("[VEND] WARNING: No water at inlet");
                 lcd_driver_update_info("WARN: No inlet water");
-                if (current_state == VEND_STATE_DISPENSING || 
-                    current_state == VEND_STATE_HOLD_PUMP) {
-                    // Allow pump to continue briefly (may be air bubble)
-                }
                 break;
 
             case EVT_SENSOR_INLET_WATER_OK:
@@ -382,13 +475,14 @@ void vending_controller_update(void)
             break;
 
         case VEND_STATE_HOLD_PUMP:
-            // Update RPM data
+            // HOLD = Manual priming mode - no fault monitoring, no stall detection
+            // User is manually controlling and watching the pump
             pump_driver_update_rpm();
             system_state_update_pump(true, pump_driver_get_speed(),
                                      pump_driver_get_pump_head_rpm(),
                                      pump_driver_get_pulse_count());
             
-            // Update LCD with hold mode status
+            // Update LCD with hold mode status (no error checks)
             {
                 static uint32_t last_hold_lcd = 0;
                 if (millis() - last_hold_lcd >= 200) {
@@ -396,7 +490,7 @@ void vending_controller_update(void)
                     lcd_driver_show_hold_mode(pump_driver_get_speed(), 
                                                pump_driver_get_pulse_count());
                     
-                    // Update sensor status
+                    // Show sensor status (info only, no errors)
                     bool inlet_ok = (sensor_driver_get_state(SENSOR_INLET) == SENSOR_HAS_WATER);
                     bool outlet_ok = (sensor_driver_get_state(SENSOR_OUTLET) == SENSOR_HAS_WATER);
                     lcd_driver_update_sensors(inlet_ok, outlet_ok);
@@ -410,6 +504,42 @@ void vending_controller_update(void)
             system_state_update_pump(true, pump_driver_get_speed(),
                                      pump_driver_get_pump_head_rpm(),
                                      pump_driver_get_pulse_count());
+            
+            // Motor stall detection
+            if (millis() - last_stall_check_ms >= STALL_CHECK_INTERVAL_MS) {
+                last_stall_check_ms = millis();
+                if (pump_driver_check_motor_stall()) {
+                    event_bus_publish(EVT_ERR_MOTOR_STALL, 0, 0);
+                }
+            }
+            break;
+
+        case VEND_STATE_PRIMING:
+            // Priming mode: wait for user to confirm water flow
+            pump_driver_update_rpm();
+            
+            // Check if both sensors now show water (priming complete)
+            if (sensor_driver_both_have_water()) {
+                Serial.println("[VEND] Priming complete - water detected");
+                lcd_driver_update_info("Priming OK!");
+                sensor_driver_set_priming_mode(false);
+                transition_to(VEND_STATE_IDLE);
+            }
+            
+            // Allow user to manually release hold to exit priming
+            // (handled by button release event)
+            break;
+
+        case VEND_STATE_LOCKDOWN:
+            // LOCKDOWN: Reject all commands until technician reset
+            // Only way out is vending_controller_reset_lockdown() or power cycle
+            {
+                static uint32_t last_lockdown_blink = 0;
+                if (millis() - last_lockdown_blink >= 2000) {
+                    last_lockdown_blink = millis();
+                    Serial.println("[VEND] LOCKDOWN ACTIVE - Call technician");
+                }
+            }
             break;
 
         case VEND_STATE_COMPLETE:
@@ -467,5 +597,49 @@ bool vending_controller_dispense_ml(uint32_t volume_ml, uint8_t speed_percent)
     if (speed_percent == 0 || speed_percent > 100) return false;
 
     start_volume_dispense(volume_ml, speed_percent);
+    return true;
+}
+
+/**
+ * @brief Reset lockdown state (technician function)
+ * @details Only call after technician has verified and fixed the issue
+ * @return true if successfully reset from lockdown
+ */
+bool vending_controller_reset_lockdown(void)
+{
+    if (current_state != VEND_STATE_LOCKDOWN) return false;
+    
+    Serial.println("[VEND] *** LOCKDOWN RESET BY TECHNICIAN ***");
+    last_error_code = ERR_CODE_NONE;
+    transition_to(VEND_STATE_IDLE);
+    return true;
+}
+
+/**
+ * @brief Get last error code (for RS485/MQTT reporting)
+ * @return error_code_t last error code
+ */
+uint8_t vending_controller_get_last_error(void)
+{
+    return (uint8_t)last_error_code;
+}
+
+/**
+ * @brief Start priming mode manually
+ * @param speed_percent Pump speed for priming
+ * @return true if priming started
+ */
+bool vending_controller_start_priming(uint8_t speed_percent)
+{
+    if (current_state != VEND_STATE_IDLE && current_state != VEND_STATE_ERROR) {
+        return false;
+    }
+    
+    pump_driver_reset_pulses();
+    pump_driver_set_direction(PUMP_DIR_CW);
+    pump_driver_start(speed_percent);
+    
+    Serial.printf("[VEND] Priming mode started @ %d%%\n", speed_percent);
+    transition_to(VEND_STATE_PRIMING);
     return true;
 }
