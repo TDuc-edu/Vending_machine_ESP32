@@ -164,7 +164,7 @@ void lcd_driver_show_ready(void)
     //                  "01234567890123456789"
     lcd_driver_print_at(0, 0, "=== READY TO POUR ===");
     lcd_driver_print_at(0, 1, "BTN0:Hold BTN1:100ml");
-    lcd_driver_print_at(0, 2, "BTN2:50ml           ");
+    lcd_driver_print_at(0, 2, "BTN2:250ml           ");
     lcd_driver_print_at(0, 3, "IN:-- OUT:--        ");
 }
 

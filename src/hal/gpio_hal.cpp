@@ -24,8 +24,7 @@ void gpio_hal_init(void)
     pinMode(PIN_MOTOR_DIR, OUTPUT);
     digitalWrite(PIN_MOTOR_DIR, HIGH);  // Default: CW
 
-    // FG signal input with pull-up
-    pinMode(PIN_FG_SIGNAL, INPUT_PULLUP);
+    pinMode(PIN_FG_SIGNAL, INPUT);     //pull up 10k - 3v3
 
     // Liquid level sensors on GPIO35, GPIO39 (input-only, no pull-up capability)
     // External pull-up via 2N2222A transistor circuit

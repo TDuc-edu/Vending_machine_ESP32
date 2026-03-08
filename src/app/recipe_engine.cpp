@@ -14,7 +14,7 @@ static recipe_t recipes[MAX_RECIPES] = {
     {
         .mode          = RECIPE_MODE_HOLD,
         .volume_ml     = 0,
-        .speed_percent = 70,
+        .speed_percent = 80,
         .name          = "HOLD"
     },
     // BTN_1: Dispense 100ml
@@ -24,12 +24,12 @@ static recipe_t recipes[MAX_RECIPES] = {
         .speed_percent = 80,
         .name          = "100ml"
     },
-    // BTN_2: Dispense 50ml
+    // BTN_2: Dispense 250ml
     {
         .mode          = RECIPE_MODE_VOLUME,
-        .volume_ml     = 50,
-        .speed_percent = 70,
-        .name          = "50ml"
+        .volume_ml     = 250,
+        .speed_percent = 80,
+        .name          = "250ml"
     }
 };
 

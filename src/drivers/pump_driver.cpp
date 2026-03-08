@@ -109,8 +109,7 @@ bool pump_driver_init(void)
     gpio_hal_set_mode(PIN_MOTOR_DIR, GPIO_HAL_OUTPUT);
     gpio_hal_write(PIN_MOTOR_DIR, GPIO_HAL_HIGH);  // CW default
 
-    // FG signal input with interrupt
-    gpio_hal_set_mode(PIN_FG_SIGNAL, GPIO_HAL_INPUT_PULLUP);
+    gpio_hal_set_mode(PIN_FG_SIGNAL, GPIO_HAL_INPUT); //pull up 10k - 3v3
     gpio_hal_attach_interrupt(PIN_FG_SIGNAL, fg_signal_isr, GPIO_HAL_EDGE_RISING);
 
     // Initialize status
